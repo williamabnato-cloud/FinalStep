@@ -1,0 +1,1965 @@
+--[[
+    ============================================================================
+    ECLIPSE DUAL SCRIPT LOADER - EXTENDED MODULAR EDITION
+    ============================================================================
+    Version: 2.0.0-extended
+    Description: Extended modular loader for Eclipse VS dual script execution
+    Author: Eclipse Development Team
+    License: Private/Internal Use Only
+    ============================================================================
+    
+    TABLE OF CONTENTS:
+    1.0 - Configuration Constants
+    2.0 - Utility Functions
+    3.0 - Logger System
+    4.0 - HTTP Handler Module
+    5.0 - Script Executor Module
+    6.0 - Timer/Delay Manager
+    7.0 - Error Handler Module
+    8.0 - Performance Monitor
+    9.0 - Script Registry
+    10.0 - Main Execution Pipeline
+    11.0 - Cleanup Handler
+    12.0 - Entry Point
+    
+    ============================================================================
+--]]
+
+-- ============================================================================
+-- SECTION 1: CONFIGURATION CONSTANTS
+-- ============================================================================
+
+local CONFIG = {
+    -- Script URLs Configuration
+    SCRIPTS = {
+        PRIMARY = {
+            URL = "https://raw.githubusercontent.com/bot248480-eng/Ofuscator-2/refs/heads/main/3852",
+            NAME = "Vial Intro",
+            DESCRIPTION = "Primary intro script from RTH repository",
+            VERSION_CHECK = false,
+            RETRY_COUNT = 3,
+            RETRY_DELAY = 1,
+            TIMEOUT = 30,
+            ENABLED = true,
+            PRIORITY = 1,
+            TAGS = {"intro", "primary", "rth"}
+        },
+        SECONDARY = {
+            URL = "https://raw.githubusercontent.com/bot248480-eng/Ofuscator-2/refs/heads/main/9321",
+            NAME = "Vial GG",
+            DESCRIPTION = "Secondary gameplay script from RTH repository",
+            VERSION_CHECK = false,
+            RETRY_COUNT = 3,
+            RETRY_DELAY = 1,
+            TIMEOUT = 30,
+            ENABLED = true,
+            PRIORITY = 2,
+            TAGS = {"gameplay", "secondary", "rth"}
+        }
+    },
+    
+    -- Timing Configuration
+    TIMING = {
+        INITIAL_DELAY = 3,
+        DELAY_UNIT = "seconds",
+        PRE_EXECUTION_WAIT = 0.1,
+        POST_EXECUTION_WAIT = 0.5,
+        BETWEEN_SCRIPTS_WAIT = 0.2,
+        MAX_TOTAL_EXECUTION_TIME = 120,
+        GRACEFUL_SHUTDOWN_DELAY = 1
+    },
+    
+    -- Error Handling Configuration
+    ERROR_HANDLING = {
+        ENABLED = true,
+        MAX_RETRIES = 3,
+        RETRY_BACKOFF_MULTIPLIER = 1.5,
+        LOG_ERRORS = true,
+        THROW_ON_FINAL_FAILURE = false,
+        SILENT_MODE = false,
+        ERROR_CALLBACK = nil
+    },
+    
+    -- Logging Configuration
+    LOGGING = {
+        ENABLED = true,
+        LOG_LEVEL = "INFO",
+        LOG_TO_CONSOLE = true,
+        LOG_TO_FILE = false,
+        LOG_TIMESTAMP = true,
+        LOG_PREFIX = "[EclipseLoader]",
+        COLORIZE_OUTPUT = true,
+        VERBOSE_MODE = false
+    },
+    
+    -- Performance Configuration
+    PERFORMANCE = {
+        MONITOR_ENABLED = true,
+        TRACK_MEMORY = true,
+        TRACK_TIMING = true,
+        REPORT_ON_COMPLETE = true,
+        BENCHMARK_MODE = false
+    },
+    
+    -- Safety Configuration
+    SAFETY = {
+        SANITIZE_INPUT = true,
+        VALIDATE_URLS = true,
+        CHECK_HTTP_AVAILABILITY = true,
+        REQUIRE_GAME_CONTEXT = true,
+        ALLOW_FALLBACK = true,
+        MAX_SCRIPT_SIZE = 1000000
+    }
+}
+
+-- ============================================================================
+-- SECTION 2: UTILITY FUNCTIONS
+-- ============================================================================
+
+local Utilities = {}
+
+function Utilities.deepCopy(original)
+    local copy
+    if type(original) == "table" then
+        copy = {}
+        for key, value in pairs(original) do
+            copy[Utilities.deepCopy(key)] = Utilities.deepCopy(value)
+        end
+    else
+        copy = original
+    end
+    return copy
+end
+
+function Utilities.mergeTables(base, override)
+    local result = Utilities.deepCopy(base)
+    for key, value in pairs(override) do
+        if type(value) == "table" and type(result[key]) == "table" then
+            result[key] = Utilities.mergeTables(result[key], value)
+        else
+            result[key] = Utilities.deepCopy(value)
+        end
+    end
+    return result
+end
+
+function Utilities.tableContains(table, element)
+    for _, value in pairs(table) do
+        if value == element then
+            return true
+        end
+    end
+    return false
+end
+
+function Utilities.getTableLength(t)
+    local count = 0
+    for _ in pairs(t) do
+        count = count + 1
+    end
+    return count
+end
+
+function Utilities.isStringEmpty(str)
+    return str == nil or str == "" or str:match("^%s*$") ~= nil
+end
+
+function Utilities.trimString(str)
+    if str == nil then return nil end
+    return str:match("^%s*(.-)%s*$")
+end
+
+function Utilities.isValidURL(url)
+    if Utilities.isStringEmpty(url) then
+        return false
+    end
+    local pattern = "^https?://[%w%.%-]+%.%w+/"
+    return url:match(pattern) ~= nil
+end
+
+function Utilities.getCurrentTimestamp()
+    return os.time()
+end
+
+function Utilities.getFormattedTimestamp()
+    local timestamp = os.date("*t")
+    return string.format(
+        "%04d-%02d-%02d %02d:%02d:%02d",
+        timestamp.year,
+        timestamp.month,
+        timestamp.day,
+        timestamp.hour,
+        timestamp.min,
+        timestamp.sec
+    )
+end
+
+function Utilities.generateUniqueId()
+    local chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+    local id = ""
+    for i = 1, 16 do
+        local rand = math.random(1, #chars)
+        id = id .. chars:sub(rand, rand)
+    end
+    return id
+end
+
+function Utilities.safeCall(func, ...)
+    local success, result = pcall(func, ...)
+    return success, result
+end
+
+function Utilities.waitForCondition(condition, timeout, checkInterval)
+    local startTime = tick()
+    local interval = checkInterval or 0.1
+    
+    while tick() - startTime < (timeout or 10) do
+        if condition() then
+            return true
+        end
+        task.wait(interval)
+    end
+    return false
+end
+
+function Utilities.retryOperation(operation, maxRetries, delay, backoff)
+    local retries = 0
+    local currentDelay = delay or 1
+    local backoffMultiplier = backoff or 1
+    
+    while retries < maxRetries do
+        local success, result = pcall(operation)
+        if success then
+            return true, result
+        end
+        
+        retries = retries + 1
+        if retries < maxRetries then
+            task.wait(currentDelay)
+            currentDelay = currentDelay * backoffMultiplier
+        end
+    end
+    
+    return false, nil
+end
+
+function Utilities.formatBytes(bytes)
+    if bytes < 1024 then
+        return string.format("%.2f B", bytes)
+    elseif bytes < 1024 * 1024 then
+        return string.format("%.2f KB", bytes / 1024)
+    else
+        return string.format("%.2f MB", bytes / (1024 * 1024))
+    end
+end
+
+function Utilities.getEnvironmentInfo()
+    return {
+        platform = "Roblox",
+        executor = identifyexecutor and identifyexecutor() or "Unknown",
+        timestamp = Utilities.getFormattedTimestamp(),
+        uniqueId = Utilities.generateUniqueId()
+    }
+end
+
+-- ============================================================================
+-- SECTION 3: LOGGER SYSTEM
+-- ============================================================================
+
+local Logger = {}
+Logger.__index = Logger
+
+Logger.LEVELS = {
+    DEBUG = 1,
+    INFO = 2,
+    WARNING = 3,
+    ERROR = 4,
+    CRITICAL = 5,
+    NONE = 6
+}
+
+Logger.COLORS = {
+    DEBUG = "gray",
+    INFO = "cyan",
+    WARNING = "yellow",
+    ERROR = "red",
+    CRITICAL = "magenta"
+}
+
+function Logger.new(config)
+    local self = setmetatable({}, Logger)
+    
+    self.enabled = config.ENABLED or true
+    self.level = Logger.LEVELS[config.LOG_LEVEL] or Logger.LEVELS.INFO
+    self.logToConsole = config.LOG_TO_CONSOLE or true
+    self.logToFile = config.LOG_TO_FILE or false
+    self.showTimestamp = config.LOG_TIMESTAMP or true
+    self.prefix = config.LOG_PREFIX or "[EclipseLoader]"
+    self.colorize = config.COLORIZE_OUTPUT or false
+    self.verbose = config.VERBOSE_MODE or false
+    self.entries = {}
+    self.startTime = tick()
+    
+    return self
+end
+
+function Logger:shouldLog(level)
+    if not self.enabled then
+        return false
+    end
+    return Logger.LEVELS[level] >= self.level
+end
+
+function Logger:formatMessage(level, message, ...)
+    local formatted = ""
+    
+    if self.showTimestamp then
+        formatted = formatted .. "[" .. Utilities.getFormattedTimestamp() .. "] "
+    end
+    
+    formatted = formatted .. self.prefix .. " "
+    formatted = formatted .. "[" .. level .. "] "
+    formatted = formatted .. tostring(message)
+    
+    local args = {...}
+    if #args > 0 then
+        local argStrings = {}
+        for i, arg in ipairs(args) do
+            table.insert(argStrings, tostring(arg))
+        end
+        formatted = formatted .. " | " .. table.concat(argStrings, ", ")
+    end
+    
+    return formatted
+end
+
+function Logger:log(level, message, ...)
+    if not self:shouldLog(level) then
+        return
+    end
+    
+    local formatted = self:formatMessage(level, message, ...)
+    
+    table.insert(self.entries, {
+        level = level,
+        message = formatted,
+        timestamp = tick(),
+        rawMessage = message
+    })
+    
+    if self.logToConsole then
+        if self.colorize then
+            -- Color output if supported
+            local color = Logger.COLORS[level] or "white"
+            print(formatted)
+        else
+            print(formatted)
+        end
+    end
+end
+
+function Logger:debug(message, ...)
+    self:log("DEBUG", message, ...)
+end
+
+function Logger:info(message, ...)
+    self:log("INFO", message, ...)
+end
+
+function Logger:warning(message, ...)
+    self:log("WARNING", message, ...)
+end
+
+function Logger:error(message, ...)
+    self:log("ERROR", message, ...)
+end
+
+function Logger:critical(message, ...)
+    self:log("CRITICAL", message, ...)
+end
+
+function Logger:getEntries()
+    return self.entries
+end
+
+function Logger:getEntryCount()
+    return #self.entries
+end
+
+function Logger:getEntriesByLevel(level)
+    local filtered = {}
+    for _, entry in ipairs(self.entries) do
+        if entry.level == level then
+            table.insert(filtered, entry)
+        end
+    end
+    return filtered
+end
+
+function Logger:clearEntries()
+    self.entries = {}
+end
+
+function Logger:getUptime()
+    return tick() - self.startTime
+end
+
+function Logger:generateReport()
+    local report = {
+        totalEntries = self:getEntryCount(),
+        uptime = self:getUptime(),
+        levelCounts = {}
+    }
+    
+    for levelName, _ in pairs(Logger.LEVELS) do
+        report.levelCounts[levelName] = #self:getEntriesByLevel(levelName)
+    end
+    
+    return report
+end
+
+function Logger:setLevel(level)
+    if Logger.LEVELS[level] then
+        self.level = Logger.LEVELS[level]
+    end
+end
+
+function Logger:enable()
+    self.enabled = true
+end
+
+function Logger:disable()
+    self.enabled = false
+end
+
+-- ============================================================================
+-- SECTION 4: HTTP HANDLER MODULE
+-- ============================================================================
+
+local HttpHandler = {}
+HttpHandler.__index = HttpHandler
+
+function HttpHandler.new(logger, config)
+    local self = setmetatable({}, HttpHandler)
+    
+    self.logger = logger
+    self.config = config or {}
+    self.cache = {}
+    self.requestCount = 0
+    self.totalBytesReceived = 0
+    self.errors = {}
+    self.isAvailable = false
+    
+    -- Check HTTP availability
+    self:checkAvailability()
+    
+    return self
+end
+
+function HttpHandler:checkAvailability()
+    self.logger:debug("Checking HTTP availability...")
+    
+    local success, result = pcall(function()
+        return game and game.HttpGet and true or false
+    end)
+    
+    if success and result then
+        self.isAvailable = true
+        self.logger:info("HTTP service available")
+    else
+        -- Try alternative check
+        local altSuccess = pcall(function()
+            game:HttpGet("https://httpbin.org/get")
+            return true
+        end)
+        
+        self.isAvailable = altSuccess
+        if altSuccess then
+            self.logger:info("HTTP service available (alternative check)")
+        else
+            self.logger:warning("HTTP service not available")
+        end
+    end
+    
+    return self.isAvailable
+end
+
+function HttpHandler:isHTTPAvailable()
+    return self.isAvailable
+end
+
+function HttpHandler:validateURL(url)
+    if Utilities.isStringEmpty(url) then
+        self.logger:error("URL is empty or nil")
+        return false, "URL is empty"
+    end
+    
+    if not Utilities.isValidURL(url) then
+        self.logger:error("Invalid URL format: " .. tostring(url))
+        return false, "Invalid URL format"
+    end
+    
+    -- Additional security checks
+    if url:match("%.exe$") or url:match("%.bat$") then
+        self.logger:error("Potentially dangerous URL detected")
+        return false, "Dangerous file type"
+    end
+    
+    return true, "Valid"
+end
+
+function HttpHandler:fetch(url, options)
+    options = options or {}
+    local timeout = options.timeout or self.config.TIMEOUT or 30
+    local useCache = options.useCache or false
+    local retries = options.retries or self.config.RETRY_COUNT or 3
+    local retryDelay = options.retryDelay or self.config.RETRY_DELAY or 1
+    
+    self.logger:info("Fetching URL: " .. url)
+    
+    -- Validate URL
+    local isValid, validationMessage = self:validateURL(url)
+    if not isValid then
+        self.logger:error("URL validation failed: " .. validationMessage)
+        return false, nil, validationMessage
+    end
+    
+    -- Check cache
+    if useCache and self.cache[url] then
+        self.logger:debug("Cache hit for URL: " .. url)
+        return true, self.cache[url], "Cached"
+    end
+    
+    -- Check HTTP availability
+    if not self.isAvailable then
+        self.logger:error("HTTP service not available")
+        return false, nil, "HTTP unavailable"
+    end
+    
+    -- Attempt fetch with retries
+    local attemptCount = 0
+    local lastError = nil
+    
+    while attemptCount < retries do
+        attemptCount = attemptCount + 1
+        
+        self.logger:debug("Fetch attempt " .. attemptCount .. "/" .. retries)
+        
+        local success, result = pcall(function()
+            return game:HttpGet(url, true)
+        end)
+        
+        if success and result then
+            self.requestCount = self.requestCount + 1
+            self.totalBytesReceived = self.totalBytesReceived + #result
+            
+            -- Cache result if caching enabled
+            if useCache then
+                self.cache[url] = result
+            end
+            
+            self.logger:info("Successfully fetched URL (attempt " .. attemptCount .. ")")
+            self.logger:debug("Received " .. Utilities.formatBytes(#result) .. " of data")
+            
+            return true, result, "Success"
+        else
+            lastError = tostring(result)
+            self.logger:warning("Fetch attempt " .. attemptCount .. " failed: " .. lastError)
+            
+            table.insert(self.errors, {
+                url = url,
+                attempt = attemptCount,
+                error = lastError,
+                timestamp = Utilities.getCurrentTimestamp()
+            })
+            
+            if attemptCount < retries then
+                local delay = retryDelay * (CONFIG.ERROR_HANDLING.RETRY_BACKOFF_MULTIPLIER ^ (attemptCount - 1))
+                self.logger:debug("Waiting " .. delay .. "s before retry...")
+                task.wait(delay)
+            end
+        end
+    end
+    
+    self.logger:error("All fetch attempts failed for URL: " .. url)
+    return false, nil, lastError
+end
+
+function HttpHandler:getStats()
+    return {
+        requestCount = self.requestCount,
+        totalBytesReceived = self.totalBytesReceived,
+        cacheSize = Utilities.getTableLength(self.cache),
+        errorCount = #self.errors,
+        isAvailable = self.isAvailable
+    }
+end
+
+function HttpHandler:clearCache()
+    self.cache = {}
+    self.logger:debug("HTTP cache cleared")
+end
+
+function HttpHandler:getErrors()
+    return self.errors
+end
+
+function HttpHandler:clearErrors()
+    self.errors = {}
+end
+
+-- ============================================================================
+-- SECTION 5: SCRIPT EXECUTOR MODULE
+-- ============================================================================
+
+local ScriptExecutor = {}
+ScriptExecutor.__index = ScriptExecutor
+
+function ScriptExecutor.new(logger, httpHandler, config)
+    local self = setmetatable({}, ScriptExecutor)
+    
+    self.logger = logger
+    self.httpHandler = httpHandler
+    self.config = config or {}
+    self.executedScripts = {}
+    self.executionHistory = {}
+    self.currentScript = nil
+    
+    return self
+end
+
+function ScriptExecutor:validateScriptContent(content)
+    if Utilities.isStringEmpty(content) then
+        self.logger:error("Script content is empty")
+        return false, "Empty content"
+    end
+    
+    -- Check script size
+    if self.config.SAFETY and self.config.SAFETY.MAX_SCRIPT_SIZE then
+        if #content > self.config.SAFETY.MAX_SCRIPT_SIZE then
+            self.logger:error("Script exceeds maximum size")
+            return false, "Script too large"
+        end
+    end
+    
+    -- Basic content validation
+    if content:match("require%s*%(.*%)") and not content:match("game:GetService") then
+        self.logger:warning("Script contains require - potential external dependency")
+    end
+    
+    return true, "Valid"
+end
+
+function ScriptExecutor:fetchScript(scriptConfig)
+    self.logger:info("Preparing to fetch script: " .. scriptConfig.NAME)
+    
+    if not scriptConfig.ENABLED then
+        self.logger:warning("Script is disabled: " .. scriptConfig.NAME)
+        return false, nil, "Script disabled"
+    end
+    
+    local success, content, message = self.httpHandler:fetch(scriptConfig.URL, {
+        timeout = scriptConfig.TIMEOUT,
+        retries = scriptConfig.RETRY_COUNT,
+        retryDelay = scriptConfig.RETRY_DELAY
+    })
+    
+    if not success then
+        self.logger:error("Failed to fetch script: " .. scriptConfig.NAME .. " - " .. tostring(message))
+        return false, nil, message
+    end
+    
+    -- Validate content
+    local isValid, validationMessage = self:validateScriptContent(content)
+    if not isValid then
+        self.logger:error("Script validation failed: " .. scriptConfig.NAME .. " - " .. validationMessage)
+        return false, nil, validationMessage
+    end
+    
+    self.logger:info("Script fetched and validated: " .. scriptConfig.NAME)
+    return true, content, "Success"
+end
+
+function ScriptExecutor:compileScript(content)
+    self.logger:debug("Compiling script...")
+    
+    local compileSuccess, compiledFunction = pcall(function()
+        return loadstring(content)
+    end)
+    
+    if not compileSuccess then
+        self.logger:error("Script compilation failed: " .. tostring(compiledFunction))
+        return false, nil, tostring(compiledFunction)
+    end
+    
+    if compiledFunction == nil then
+        self.logger:error("Compiled function is nil")
+        return false, nil, "Nil compiled function"
+    end
+    
+    self.logger:debug("Script compiled successfully")
+    return true, compiledFunction, "Success"
+end
+
+function ScriptExecutor:executeScript(compiledFunction, scriptName)
+    self.logger:info("Executing script: " .. scriptName)
+    
+    local startTime = tick()
+    
+    -- Set current script reference
+    self.currentScript = scriptName
+    
+    local success, result = pcall(compiledFunction)
+    
+    local endTime = tick()
+    local executionTime = endTime - startTime
+    
+    -- Record execution
+    local executionRecord = {
+        name = scriptName,
+        startTime = startTime,
+        endTime = endTime,
+        executionTime = executionTime,
+        success = success,
+        result = result,
+        timestamp = Utilities.getFormattedTimestamp()
+    }
+    
+    table.insert(self.executionHistory, executionRecord)
+    
+    if success then
+        self.logger:info("Script executed successfully: " .. scriptName)
+        self.logger:debug("Execution time: " .. string.format("%.3f", executionTime) .. "s")
+        
+        table.insert(self.executedScripts, {
+            name = scriptName,
+            timestamp = Utilities.getCurrentTimestamp(),
+            executionTime = executionTime
+        })
+    else
+        self.logger:error("Script execution failed: " .. scriptName .. " - " .. tostring(result))
+    end
+    
+    self.currentScript = nil
+    
+    return success, result, executionTime
+end
+
+function ScriptExecutor:loadAndExecute(scriptConfig)
+    self.logger:info("Starting load-and-execute pipeline for: " .. scriptConfig.NAME)
+    
+    -- Fetch
+    local fetchSuccess, content, fetchMessage = self:fetchScript(scriptConfig)
+    if not fetchSuccess then
+        return false, "Fetch failed: " .. tostring(fetchMessage)
+    end
+    
+    -- Compile
+    local compileSuccess, compiledFunction, compileMessage = self:compileScript(content)
+    if not compileSuccess then
+        return false, "Compile failed: " .. tostring(compileMessage)
+    end
+    
+    -- Execute
+    local execSuccess, execResult, execTime = self:executeScript(compiledFunction, scriptConfig.NAME)
+    if not execSuccess then
+        return false, "Execution failed: " .. tostring(execResult)
+    end
+    
+    self.logger:info("Pipeline complete for: " .. scriptConfig.NAME)
+    return true, "Success"
+end
+
+function ScriptExecutor:getExecutedScripts()
+    return self.executedScripts
+end
+
+function ScriptExecutor:getExecutionHistory()
+    return self.executionHistory
+end
+
+function ScriptExecutor:getExecutionCount()
+    return #self.executedScripts
+end
+
+function ScriptExecutor:getCurrentScript()
+    return self.currentScript
+end
+
+function ScriptExecutor:getTotalExecutionTime()
+    local totalTime = 0
+    for _, record in ipairs(self.executionHistory) do
+        totalTime = totalTime + (record.executionTime or 0)
+    end
+    return totalTime
+end
+
+function ScriptExecutor:generateExecutionReport()
+    return {
+        totalExecutions = self:getExecutionCount(),
+        totalExecutionTime = self:getTotalExecutionTime(),
+        averageExecutionTime = self:getExecutionCount() > 0 and (self:getTotalExecutionTime() / self:getExecutionCount()) or 0,
+        history = self:getExecutionHistory()
+    }
+end
+
+function ScriptExecutor:clearHistory()
+    self.executedScripts = {}
+    self.executionHistory = {}
+    self.logger:debug("Execution history cleared")
+end
+
+-- ============================================================================
+-- SECTION 6: TIMER/DELAY MANAGER
+-- ============================================================================
+
+local TimerManager = {}
+TimerManager.__index = TimerManager
+
+function TimerManager.new(logger, config)
+    local self = setmetatable({}, TimerManager)
+    
+    self.logger = logger
+    self.config = config or {}
+    self.timers = {}
+    self.activeTimers = {}
+    self.totalWaitTime = 0
+    
+    return self
+end
+
+function TimerManager:createTimer(name, duration, callback)
+    local timer = {
+        name = name,
+        duration = duration,
+        callback = callback,
+        startTime = nil,
+        endTime = nil,
+        status = "pending",
+        id = Utilities.generateUniqueId()
+    }
+    
+    self.timers[name] = timer
+    self.logger:debug("Timer created: " .. name .. " (" .. duration .. "s)")
+    
+    return timer
+end
+
+function TimerManager:startTimer(name)
+    local timer = self.timers[name]
+    if not timer then
+        self.logger:error("Timer not found: " .. name)
+        return false
+    end
+    
+    timer.startTime = tick()
+    timer.status = "running"
+    table.insert(self.activeTimers, name)
+    
+    self.logger:debug("Timer started: " .. name)
+    return true
+end
+
+function TimerManager:stopTimer(name)
+    local timer = self.timers[name]
+    if not timer then
+        self.logger:error("Timer not found: " .. name)
+        return false
+    end
+    
+    timer.endTime = tick()
+    timer.status = "completed"
+    
+    -- Remove from active timers
+    for i, activeName in ipairs(self.activeTimers) do
+        if activeName == name then
+            table.remove(self.activeTimers, i)
+            break
+        end
+    end
+    
+    self.logger:debug("Timer stopped: " .. name)
+    return true
+end
+
+function TimerManager:wait(duration, description)
+    description = description or "unnamed wait"
+    
+    self.logger:debug("Waiting " .. duration .. "s - " .. description)
+    
+    local startTime = tick()
+    task.wait(duration)
+    local endTime = tick()
+    
+    local actualDuration = endTime - startTime
+    self.totalWaitTime = self.totalWaitTime + actualDuration
+    
+    self.logger:debug("Wait complete - " .. description .. " (actual: " .. string.format("%.3f", actualDuration) .. "s)")
+    
+    return actualDuration
+end
+
+function TimerManager:waitWithProgress(duration, description, updateInterval)
+    description = description or "unnamed wait"
+    updateInterval = updateInterval or 1
+    
+    self.logger:info("Waiting " .. duration .. "s - " .. description)
+    
+    local startTime = tick()
+    local elapsed = 0
+    
+    while elapsed < duration do
+        local remaining = duration - elapsed
+        local waitTime = math.min(updateInterval, remaining)
+        
+        task.wait(waitTime)
+        elapsed = tick() - startTime
+        
+        if remaining > updateInterval then
+            self.logger:debug(string.format("%.1fs remaining...", remaining))
+        end
+    end
+    
+    self.totalWaitTime = self.totalWaitTime + duration
+    
+    self.logger:info("Wait complete - " .. description)
+    return duration
+end
+
+function TimerManager:executeAfterDelay(delay, callback, description)
+    description = description or "delayed execution"
+    
+    self.logger:debug("Scheduling execution after " .. delay .. "s - " .. description)
+    
+    task.delay(delay, function()
+        self.logger:debug("Executing delayed task - " .. description)
+        local success, result = pcall(callback)
+        
+        if not success then
+            self.logger:error("Delayed execution failed - " .. description .. ": " .. tostring(result))
+        end
+    end)
+end
+
+function TimerManager:getTotalWaitTime()
+    return self.totalWaitTime
+end
+
+function TimerManager:getActiveTimers()
+    return self.activeTimers
+end
+
+function TimerManager:getTimerInfo(name)
+    return self.timers[name]
+end
+
+function TimerManager:reset()
+    self.timers = {}
+    self.activeTimers = {}
+    self.totalWaitTime = 0
+    self.logger:debug("Timer manager reset")
+end
+
+-- ============================================================================
+-- SECTION 7: ERROR HANDLER MODULE
+-- ============================================================================
+
+local ErrorHandler = {}
+ErrorHandler.__index = ErrorHandler
+
+ErrorHandler.ERROR_TYPES = {
+    NETWORK = "NETWORK",
+    SCRIPT = "SCRIPT",
+    COMPILATION = "COMPILATION",
+    EXECUTION = "EXECUTION",
+    VALIDATION = "VALIDATION",
+    TIMEOUT = "TIMEOUT",
+    UNKNOWN = "UNKNOWN"
+}
+
+ErrorHandler.SEVERITY = {
+    LOW = "LOW",
+    MEDIUM = "MEDIUM",
+    HIGH = "HIGH",
+    CRITICAL = "CRITICAL"
+}
+
+function ErrorHandler.new(logger, config)
+    local self = setmetatable({}, ErrorHandler)
+    
+    self.logger = logger
+    self.config = config or {}
+    self.errors = {}
+    self.errorCount = 0
+    self.recoveryStrategies = {}
+    self.onErrorHandler = config.ERROR_CALLBACK
+    
+    self:registerDefaultStrategies()
+    
+    return self
+end
+
+function ErrorHandler:registerDefaultStrategies()
+    -- Network error recovery
+    self:registerRecoveryStrategy(ErrorHandler.ERROR_TYPES.NETWORK, function(error)
+        self.logger:info("Attempting network error recovery...")
+        task.wait(2)
+        return true -- Retry
+    end)
+    
+    -- Script error recovery
+    self:registerRecoveryStrategy(ErrorHandler.ERROR_TYPES.SCRIPT, function(error)
+        self.logger:info("Script error recovery - skipping...")
+        return false -- Skip
+    end)
+    
+    -- Compilation error recovery
+    self:registerRecoveryStrategy(ErrorHandler.ERROR_TYPES.COMPILATION, function(error)
+        self.logger:info("Compilation error - cannot recover")
+        return false -- Skip
+    end)
+end
+
+function ErrorHandler:registerRecoveryStrategy(errorType, strategy)
+    self.recoveryStrategies[errorType] = strategy
+    self.logger:debug("Recovery strategy registered for: " .. errorType)
+end
+
+function ErrorHandler:handleError(errorType, message, severity, context)
+    severity = severity or ErrorHandler.SEVERITY.MEDIUM
+    
+    self.errorCount = self.errorCount + 1
+    
+    local errorRecord = {
+        id = Utilities.generateUniqueId(),
+        type = errorType,
+        message = message,
+        severity = severity,
+        context = context,
+        timestamp = Utilities.getFormattedTimestamp(),
+        tickTimestamp = tick(),
+        handled = false,
+        recovered = false
+    }
+    
+    table.insert(self.errors, errorRecord)
+    
+    -- Log based on severity
+    if severity == ErrorHandler.SEVERITY.CRITICAL then
+        self.logger:critical(message)
+    elseif severity == ErrorHandler.SEVERITY.HIGH then
+        self.logger:error(message)
+    elseif severity == ErrorHandler.SEVERITY.MEDIUM then
+        self.logger:warning(message)
+    else
+        self.logger:debug(message)
+    end
+    
+    -- Call error handler if registered
+    if self.onErrorHandler then
+        pcall(self.onErrorHandler, errorRecord)
+    end
+    
+    -- Attempt recovery
+    local recovered = self:attemptRecovery(errorType, errorRecord)
+    errorRecord.recovered = recovered
+    errorRecord.handled = true
+    
+    return errorRecord
+end
+
+function ErrorHandler:attemptRecovery(errorType, errorRecord)
+    local strategy = self.recoveryStrategies[errorType]
+    
+    if strategy then
+        self.logger:debug("Attempting recovery for: " .. errorType)
+        local success, shouldRetry = pcall(strategy, errorRecord)
+        
+        if success then
+            return shouldRetry
+        end
+    end
+    
+    return false
+end
+
+function ErrorHandler:getErrors()
+    return self.errors
+end
+
+function ErrorHandler:getErrorCount()
+    return self.errorCount
+end
+
+function ErrorHandler:getErrorsByType(errorType)
+    local filtered = {}
+    for _, error in ipairs(self.errors) do
+        if error.type == errorType then
+            table.insert(filtered, error)
+        end
+    end
+    return filtered
+end
+
+function ErrorHandler:getErrorsBySeverity(severity)
+    local filtered = {}
+    for _, error in ipairs(self.errors) do
+        if error.severity == severity then
+            table.insert(filtered, error)
+        end
+    end
+    return filtered
+end
+
+function ErrorHandler:getRecoverableErrors()
+    local filtered = {}
+    for _, error in ipairs(self.errors) do
+        if error.recovered then
+            table.insert(filtered, error)
+        end
+    end
+    return filtered
+end
+
+function ErrorHandler:clearErrors()
+    self.errors = {}
+    self.errorCount = 0
+    self.logger:debug("Error history cleared")
+end
+
+function ErrorHandler:generateErrorReport()
+    return {
+        totalErrors = self.errorCount,
+        byType = {
+            NETWORK = #self:getErrorsByType(ErrorHandler.ERROR_TYPES.NETWORK),
+            SCRIPT = #self:getErrorsByType(ErrorHandler.ERROR_TYPES.SCRIPT),
+            COMPILATION = #self:getErrorsByType(ErrorHandler.ERROR_TYPES.COMPILATION),
+            EXECUTION = #self:getErrorsByType(ErrorHandler.ERROR_TYPES.EXECUTION),
+            VALIDATION = #self:getErrorsByType(ErrorHandler.ERROR_TYPES.VALIDATION),
+            TIMEOUT = #self:getErrorsByType(ErrorHandler.ERROR_TYPES.TIMEOUT),
+            UNKNOWN = #self:getErrorsByType(ErrorHandler.ERROR_TYPES.UNKNOWN)
+        },
+        bySeverity = {
+            LOW = #self:getErrorsBySeverity(ErrorHandler.SEVERITY.LOW),
+            MEDIUM = #self:getErrorsBySeverity(ErrorHandler.SEVERITY.MEDIUM),
+            HIGH = #self:getErrorsBySeverity(ErrorHandler.SEVERITY.HIGH),
+            CRITICAL = #self:getErrorsBySeverity(ErrorHandler.SEVERITY.CRITICAL)
+        },
+        recovered = #self:getRecoverableErrors()
+    }
+end
+
+function ErrorHandler:hasCriticalErrors()
+    return #self:getErrorsBySeverity(ErrorHandler.SEVERITY.CRITICAL) > 0
+end
+
+function ErrorHandler:throwIfCritical()
+    if self:hasCriticalErrors() then
+        local criticalErrors = self:getErrorsBySeverity(ErrorHandler.SEVERITY.CRITICAL)
+        error("Critical errors detected: " .. #criticalErrors)
+    end
+end
+
+-- ============================================================================
+-- SECTION 8: PERFORMANCE MONITOR
+-- ============================================================================
+
+local PerformanceMonitor = {}
+PerformanceMonitor.__index = PerformanceMonitor
+
+function PerformanceMonitor.new(logger, config)
+    local self = setmetatable({}, PerformanceMonitor)
+    
+    self.logger = logger
+    self.config = config or {}
+    self.enabled = config.MONITOR_ENABLED or false
+    self.metrics = {
+        startTime = tick(),
+        endTime = nil,
+        totalDuration = 0,
+        scriptFetchTimes = {},
+        scriptExecutionTimes = {},
+        waitTimes = {},
+        memorySnapshots = {},
+        customMetrics = {}
+    }
+    
+    return self
+end
+
+function PerformanceMonitor:start()
+    if not self.enabled then return end
+    
+    self.metrics.startTime = tick()
+    self.logger:debug("Performance monitoring started")
+    
+    if self.config.TRACK_MEMORY then
+        self:takeMemorySnapshot("start")
+    end
+end
+
+function PerformanceMonitor:stop()
+    if not self.enabled then return end
+    
+    self.metrics.endTime = tick()
+    self.metrics.totalDuration = self.metrics.endTime - self.metrics.startTime
+    
+    if self.config.TRACK_MEMORY then
+        self:takeMemorySnapshot("end")
+    end
+    
+    self.logger:debug("Performance monitoring stopped")
+end
+
+function PerformanceMonitor:recordFetchTime(url, duration)
+    if not self.enabled or not self.config.TRACK_TIMING then return end
+    
+    table.insert(self.metrics.scriptFetchTimes, {
+        url = url,
+        duration = duration,
+        timestamp = tick()
+    })
+end
+
+function PerformanceMonitor:recordExecutionTime(scriptName, duration)
+    if not self.enabled or not self.config.TRACK_TIMING then return end
+    
+    table.insert(self.metrics.scriptExecutionTimes, {
+        scriptName = scriptName,
+        duration = duration,
+        timestamp = tick()
+    })
+end
+
+function PerformanceMonitor:recordWaitTime(description, duration)
+    if not self.enabled or not self.config.TRACK_TIMING then return end
+    
+    table.insert(self.metrics.waitTimes, {
+        description = description,
+        duration = duration,
+        timestamp = tick()
+    })
+end
+
+function PerformanceMonitor:takeMemorySnapshot(label)
+    if not self.enabled or not self.config.TRACK_MEMORY then return end
+    
+    local memoryUsage = collectgarbage("count")
+    
+    table.insert(self.metrics.memorySnapshots, {
+        label = label or "unnamed",
+        memoryKB = memoryUsage,
+        memoryMB = memoryUsage / 1024,
+        timestamp = tick()
+    })
+    
+    self.logger:debug("Memory snapshot '" .. label .. "': " .. Utilities.formatBytes(memoryUsage * 1024))
+end
+
+function PerformanceMonitor:recordCustomMetric(name, value)
+    if not self.enabled then return end
+    
+    self.metrics.customMetrics[name] = {
+        value = value,
+        timestamp = tick()
+    }
+end
+
+function PerformanceMonitor:getTotalFetchTime()
+    local total = 0
+    for _, record in ipairs(self.metrics.scriptFetchTimes) do
+        total = total + record.duration
+    end
+    return total
+end
+
+function PerformanceMonitor:getTotalExecutionTime()
+    local total = 0
+    for _, record in ipairs(self.metrics.scriptExecutionTimes) do
+        total = total + record.duration
+    end
+    return total
+end
+
+function PerformanceMonitor:getTotalWaitTime()
+    local total = 0
+    for _, record in ipairs(self.metrics.waitTimes) do
+        total = total + record.duration
+    end
+    return total
+end
+
+function PerformanceMonitor:getMemoryDelta()
+    if #self.metrics.memorySnapshots < 2 then
+        return 0
+    end
+    
+    local first = self.metrics.memorySnapshots[1]
+    local last = self.metrics.memorySnapshots[#self.metrics.memorySnapshots]
+    
+    return last.memoryKB - first.memoryKB
+end
+
+function PerformanceMonitor:generateReport()
+    if not self.enabled then
+        return { enabled = false }
+    end
+    
+    return {
+        enabled = true,
+        totalDuration = self.metrics.totalDuration,
+        fetchTime = self:getTotalFetchTime(),
+        executionTime = self:getTotalExecutionTime(),
+        waitTime = self:getTotalWaitTime(),
+        overhead = self.metrics.totalDuration - self:getTotalFetchTime() - self:getTotalExecutionTime() - self:getTotalWaitTime(),
+        memoryDelta = self:getMemoryDelta(),
+        fetchCount = #self.metrics.scriptFetchTimes,
+        executionCount = #self.metrics.scriptExecutionTimes,
+        memorySnapshots = #self.metrics.memorySnapshots
+    }
+end
+
+function PerformanceMonitor:printReport()
+    if not self.enabled then return end
+    
+    local report = self:generateReport()
+    
+    self.logger:info("=== PERFORMANCE REPORT ===")
+    self.logger:info("Total Duration: " .. string.format("%.3f", report.totalDuration) .. "s")
+    self.logger:info("Fetch Time: " .. string.format("%.3f", report.fetchTime) .. "s")
+    self.logger:info("Execution Time: " .. string.format("%.3f", report.executionTime) .. "s")
+    self.logger:info("Wait Time: " .. string.format("%.3f", report.waitTime) .. "s")
+    self.logger:info("Overhead: " .. string.format("%.3f", report.overhead) .. "s")
+    self.logger:info("Memory Delta: " .. Utilities.formatBytes(report.memoryDelta * 1024))
+    self.logger:info("=========================")
+end
+
+function PerformanceMonitor:reset()
+    self.metrics = {
+        startTime = tick(),
+        endTime = nil,
+        totalDuration = 0,
+        scriptFetchTimes = {},
+        scriptExecutionTimes = {},
+        waitTimes = {},
+        memorySnapshots = {},
+        customMetrics = {}
+    }
+    self.logger:debug("Performance metrics reset")
+end
+
+-- ============================================================================
+-- SECTION 9: SCRIPT REGISTRY
+-- ============================================================================
+
+local ScriptRegistry = {}
+ScriptRegistry.__index = ScriptRegistry
+
+function ScriptRegistry.new(logger, config)
+    local self = setmetatable({}, ScriptRegistry)
+    
+    self.logger = logger
+    self.config = config or {}
+    self.scripts = {}
+    self.loadOrder = {}
+    
+    -- Register configured scripts
+    self:registerFromConfig()
+    
+    return self
+end
+
+function ScriptRegistry:registerFromConfig()
+    self.logger:debug("Registering scripts from configuration...")
+    
+    if self.config.SCRIPTS then
+        for key, scriptConfig in pairs(self.config.SCRIPTS) do
+            self:register(key, scriptConfig)
+        end
+    end
+    
+    -- Sort by priority
+    self:sortByPriority()
+    
+    self.logger:info("Registered " .. #self.loadOrder .. " scripts")
+end
+
+function ScriptRegistry:register(key, scriptConfig)
+    self.scripts[key] = {
+        config = scriptConfig,
+        key = key,
+        registeredAt = Utilities.getCurrentTimestamp(),
+        status = "registered",
+        lastExecuted = nil,
+        executionCount = 0
+    }
+    
+    table.insert(self.loadOrder, key)
+    
+    self.logger:debug("Script registered: " .. scriptConfig.NAME .. " (key: " .. key .. ")")
+end
+
+function ScriptRegistry:unregister(key)
+    if self.scripts[key] then
+        self.scripts[key] = nil
+        
+        for i, k in ipairs(self.loadOrder) do
+            if k == key then
+                table.remove(self.loadOrder, i)
+                break
+            end
+        end
+        
+        self.logger:debug("Script unregistered: " .. key)
+        return true
+    end
+    
+    return false
+end
+
+function ScriptRegistry:getScript(key)
+    return self.scripts[key]
+end
+
+function ScriptRegistry:getScriptConfig(key)
+    local script = self.scripts[key]
+    return script and script.config or nil
+end
+
+function ScriptRegistry:getAllScripts()
+    return self.scripts
+end
+
+function ScriptRegistry:getLoadOrder()
+    return self.loadOrder
+end
+
+function ScriptRegistry:getEnabledScripts()
+    local enabled = {}
+    for _, key in ipairs(self.loadOrder) do
+        local script = self.scripts[key]
+        if script and script.config.ENABLED then
+            table.insert(enabled, key)
+        end
+    end
+    return enabled
+end
+
+function ScriptRegistry:sortByPriority()
+    table.sort(self.loadOrder, function(a, b)
+        local scriptA = self.scripts[a]
+        local scriptB = self.scripts[b]
+        
+        if scriptA and scriptB then
+            return (scriptA.config.PRIORITY or 999) < (scriptB.config.PRIORITY or 999)
+        end
+        return false
+    end)
+    
+    self.logger:debug("Scripts sorted by priority")
+end
+
+function ScriptRegistry:updateStatus(key, status)
+    if self.scripts[key] then
+        self.scripts[key].status = status
+        self.logger:debug("Script status updated: " .. key .. " -> " .. status)
+    end
+end
+
+function ScriptRegistry:recordExecution(key)
+    if self.scripts[key] then
+        self.scripts[key].lastExecuted = Utilities.getCurrentTimestamp()
+        self.scripts[key].executionCount = self.scripts[key].executionCount + 1
+        self.scripts[key].status = "executed"
+    end
+end
+
+function ScriptRegistry:getScriptCount()
+    return Utilities.getTableLength(self.scripts)
+end
+
+function ScriptRegistry:getEnabledCount()
+    return #self:getEnabledScripts()
+end
+
+function ScriptRegistry:generateReport()
+    local report = {
+        totalScripts = self:getScriptCount(),
+        enabledScripts = self:getEnabledCount(),
+        loadOrder = self:getLoadOrder(),
+        scripts = {}
+    }
+    
+    for key, script in pairs(self.scripts) do
+        table.insert(report.scripts, {
+            key = key,
+            name = script.config.NAME,
+            enabled = script.config.ENABLED,
+            priority = script.config.PRIORITY,
+            status = script.status,
+            executionCount = script.executionCount,
+            lastExecuted = script.lastExecuted
+        })
+    end
+    
+    return report
+end
+
+function ScriptRegistry:enable(key)
+    if self.scripts[key] then
+        self.scripts[key].config.ENABLED = true
+        self.logger:info("Script enabled: " .. key)
+    end
+end
+
+function ScriptRegistry:disable(key)
+    if self.scripts[key] then
+        self.scripts[key].config.ENABLED = false
+        self.logger:info("Script disabled: " .. key)
+    end
+end
+
+function ScriptRegistry:setPriority(key, priority)
+    if self.scripts[key] then
+        self.scripts[key].config.PRIORITY = priority
+        self:sortByPriority()
+        self.logger:info("Script priority updated: " .. key .. " -> " .. priority)
+    end
+end
+
+-- ============================================================================
+-- SECTION 10: MAIN EXECUTION PIPELINE
+-- ============================================================================
+
+local ExecutionPipeline = {}
+ExecutionPipeline.__index = ExecutionPipeline
+
+ExecutionPipeline.STATES = {
+    IDLE = "IDLE",
+    INITIALIZING = "INITIALIZING",
+    RUNNING = "RUNNING",
+    WAITING = "WAITING",
+    COMPLETED = "COMPLETED",
+    FAILED = "FAILED",
+    CANCELLED = "CANCELLED"
+}
+
+function ExecutionPipeline.new(config)
+    local self = setmetatable({}, ExecutionPipeline)
+    
+    self.config = config or CONFIG
+    self.state = ExecutionPipeline.STATES.IDLE
+    self.startTime = nil
+    self.endTime = nil
+    
+    -- Initialize components
+    self.logger = Logger.new(self.config.LOGGING)
+    self.errorHandler = ErrorHandler.new(self.logger, self.config.ERROR_HANDLING)
+    self.httpHandler = HttpHandler.new(self.logger, self.config.SCRIPTS.PRIMARY)
+    self.scriptExecutor = ScriptExecutor.new(self.logger, self.httpHandler, self.config)
+    self.timerManager = TimerManager.new(self.logger, self.config.TIMING)
+    self.performanceMonitor = PerformanceMonitor.new(self.logger, self.config.PERFORMANCE)
+    self.scriptRegistry = ScriptRegistry.new(self.logger, self.config)
+    
+    return self
+end
+
+function ExecutionPipeline:getState()
+    return self.state
+end
+
+function ExecutionPipeline:setState(state)
+    self.logger:debug("Pipeline state: " .. self.state .. " -> " .. state)
+    self.state = state
+end
+
+function ExecutionPipeline:initialize()
+    self.logger:info("Initializing execution pipeline...")
+    self:setState(ExecutionPipeline.STATES.INITIALIZING)
+    
+    self.startTime = tick()
+    
+    -- Start performance monitoring
+    self.performanceMonitor:start()
+    
+    -- Log environment info
+    local envInfo = Utilities.getEnvironmentInfo()
+    self.logger:info("Platform: " .. envInfo.platform)
+    self.logger:info("Executor: " .. envInfo.executor)
+    self.logger:info("Session ID: " .. envInfo.uniqueId)
+    
+    -- Check prerequisites
+    local prerequisitesMet = self:checkPrerequisites()
+    if not prerequisitesMet then
+        self.logger:error("Prerequisites not met - aborting")
+        self:setState(ExecutionPipeline.STATES.FAILED)
+        return false
+    end
+    
+    self.logger:info("Pipeline initialized successfully")
+    return true
+end
+
+function ExecutionPipeline:checkPrerequisites()
+    self.logger:debug("Checking prerequisites...")
+    
+    -- Check HTTP availability
+    if self.config.SAFETY.CHECK_HTTP_AVAILABILITY then
+        if not self.httpHandler:isHTTPAvailable() then
+            self.errorHandler:handleError(
+                ErrorHandler.ERROR_TYPES.NETWORK,
+                "HTTP service not available",
+                ErrorHandler.SEVERITY.CRITICAL
+            )
+            return false
+        end
+    end
+    
+    -- Check game context
+    if self.config.SAFETY.REQUIRE_GAME_CONTEXT then
+        if not game then
+            self.errorHandler:handleError(
+                ErrorHandler.ERROR_TYPES.VALIDATION,
+                "Game context not available",
+                ErrorHandler.SEVERITY.CRITICAL
+            )
+            return false
+        end
+    end
+    
+    -- Check if any scripts are enabled
+    local enabledScripts = self.scriptRegistry:getEnabledScripts()
+    if #enabledScripts == 0 then
+        self.logger:warning("No enabled scripts found")
+        return false
+    end
+    
+    self.logger:info("All prerequisites met")
+    return true
+end
+
+function ExecutionPipeline:executeScriptByKey(key)
+    local scriptConfig = self.scriptRegistry:getScriptConfig(key)
+    
+    if not scriptConfig then
+        self.logger:error("Script not found: " .. key)
+        return false
+    end
+    
+    if not scriptConfig.ENABLED then
+        self.logger:warning("Script disabled: " .. key)
+        return false
+    end
+    
+    self.scriptRegistry:updateStatus(key, "executing")
+    
+    local fetchStartTime = tick()
+    local success, message = self.scriptExecutor:loadAndExecute(scriptConfig)
+    local fetchEndTime = tick()
+    
+    -- Record performance
+    self.performanceMonitor:recordFetchTime(scriptConfig.URL, fetchEndTime - fetchStartTime)
+    self.performanceMonitor:recordExecutionTime(scriptConfig.NAME, fetchEndTime - fetchStartTime)
+    
+    if success then
+        self.scriptRegistry:recordExecution(key)
+        self.scriptRegistry:updateStatus(key, "completed")
+    else
+        self.scriptRegistry:updateStatus(key, "failed")
+        
+        self.errorHandler:handleError(
+            ErrorHandler.ERROR_TYPES.EXECUTION,
+            "Script execution failed: " .. scriptConfig.NAME .. " - " .. tostring(message),
+            ErrorHandler.SEVERITY.HIGH
+        )
+    end
+    
+    return success
+end
+
+function ExecutionPipeline:executeAll()
+    self.logger:info("Starting execution of all scripts...")
+    self:setState(ExecutionPipeline.STATES.RUNNING)
+    
+    local enabledScripts = self.scriptRegistry:getEnabledScripts()
+    local results = {}
+    
+    for i, key in ipairs(enabledScripts) do
+        self.logger:info("Executing script " .. i .. "/" .. #enabledScripts .. ": " .. key)
+        
+        local success = self:executeScriptByKey(key)
+        results[key] = success
+        
+        -- Wait between scripts
+        if i < #enabledScripts then
+            self.logger:debug("Waiting between scripts...")
+            self.timerManager:wait(self.config.TIMING.BETWEEN_SCRIPTS_WAIT, "Between scripts")
+        end
+    end
+    
+    return results
+end
+
+function ExecutionPipeline:run()
+    self.logger:info("========================================")
+    self.logger:info("ECLIPSE DUAL SCRIPT LOADER - STARTING")
+    self.logger:info("========================================")
+    
+    -- Initialize
+    if not self:initialize() then
+        self.logger:error("Pipeline initialization failed")
+        self:setState(ExecutionPipeline.STATES.FAILED)
+        return false
+    end
+    
+    -- Wait initial delay
+    self.logger:info("Waiting " .. self.config.TIMING.INITIAL_DELAY .. "s before execution...")
+    self:setState(ExecutionPipeline.STATES.WAITING)
+    
+    self.timerManager:waitWithProgress(
+        self.config.TIMING.INITIAL_DELAY,
+        "Initial delay",
+        1
+    )
+    
+    -- Pre-execution wait
+    if self.config.TIMING.PRE_EXECUTION_WAIT > 0 then
+        self.timerManager:wait(
+            self.config.TIMING.PRE_EXECUTION_WAIT,
+            "Pre-execution preparation"
+        )
+    end
+    
+    -- Execute scripts
+    local results = self:executeAll()
+    
+    -- Post-execution wait
+    if self.config.TIMING.POST_EXECUTION_WAIT > 0 then
+        self.timerManager:wait(
+            self.config.TIMING.POST_EXECUTION_WAIT,
+            "Post-execution cleanup"
+        )
+    end
+    
+    -- Check for critical errors
+    if self.errorHandler:hasCriticalErrors() and self.config.ERROR_HANDLING.THROW_ON_FINAL_FAILURE then
+        self.logger:critical("Critical errors detected - throwing error")
+        self.errorHandler:throwIfCritical()
+    end
+    
+    -- Finalize
+    self:finalize(results)
+    
+    return true
+end
+
+function ExecutionPipeline:finalize(results)
+    self.endTime = tick()
+    self:setState(ExecutionPipeline.STATES.COMPLETED)
+    
+    -- Stop performance monitoring
+    self.performanceMonitor:stop()
+    
+    -- Generate reports
+    self.logger:info("========================================")
+    self.logger:info("EXECUTION COMPLETE - FINAL REPORT")
+    self.logger:info("========================================")
+    
+    -- Logger report
+    local loggerReport = self.logger:generateReport()
+    self.logger:info("Log entries: " .. loggerReport.totalEntries)
+    self.logger:info("Uptime: " .. string.format("%.3f", loggerReport.uptime) .. "s")
+    
+    -- Script execution report
+    local execReport = self.scriptExecutor:generateExecutionReport()
+    self.logger:info("Scripts executed: " .. execReport.totalExecutions)
+    self.logger:info("Total execution time: " .. string.format("%.3f", execReport.totalExecutionTime) .. "s")
+    
+    -- Performance report
+    if self.config.PERFORMANCE.REPORT_ON_COMPLETE then
+        self.performanceMonitor:printReport()
+    end
+    
+    -- Error report
+    local errorReport = self.errorHandler:generateErrorReport()
+    if errorReport.totalErrors > 0 then
+        self.logger:warning("Errors encountered: " .. errorReport.totalErrors)
+        
+        if errorReport.bySeverity.CRITICAL > 0 then
+            self.logger:critical("Critical errors: " .. errorReport.bySeverity.CRITICAL)
+        end
+    else
+        self.logger:info("No errors encountered")
+    end
+    
+    -- HTTP stats
+    local httpStats = self.httpHandler:getStats()
+    self.logger:info("HTTP requests: " .. httpStats.requestCount)
+    self.logger:info("Data received: " .. Utilities.formatBytes(httpStats.totalBytesReceived))
+    
+    -- Timing summary
+    local totalDuration = self.endTime - self.startTime
+    self.logger:info("Total duration: " .. string.format("%.3f", totalDuration) .. "s")
+    
+    -- Timer stats
+    self.logger:info("Total wait time: " .. string.format("%.3f", self.timerManager:getTotalWaitTime()) .. "s")
+    
+    self.logger:info("========================================")
+    self.logger:info("LOADER FINISHED SUCCESSFULLY")
+    self.logger:info("========================================")
+end
+
+function ExecutionPipeline:cancel()
+    self.logger:warning("Pipeline cancelled by user")
+    self:setState(ExecutionPipeline.STATES.CANCELLED)
+end
+
+function ExecutionPipeline:getDuration()
+    if self.startTime then
+        local endTime = self.endTime or tick()
+        return endTime - self.startTime
+    end
+    return 0
+end
+
+function ExecutionPipeline:generateFullReport()
+    return {
+        state = self.state,
+        duration = self:getDuration(),
+        logger = self.logger:generateReport(),
+        performance = self.performanceMonitor:generateReport(),
+        errors = self.errorHandler:generateErrorReport(),
+        scripts = self.scriptRegistry:generateReport(),
+        execution = self.scriptExecutor:generateExecutionReport(),
+        http = self.httpHandler:getStats()
+    }
+end
+
+-- ============================================================================
+-- SECTION 11: CLEANUP HANDLER
+-- ============================================================================
+
+local CleanupHandler = {}
+CleanupHandler.__index = CleanupHandler
+
+function CleanupHandler.new(pipeline)
+    local self = setmetatable({}, CleanupHandler)
+    
+    self.pipeline = pipeline
+    self.cleanupTasks = {}
+    self.executed = false
+    
+    return self
+end
+
+function CleanupHandler:registerCleanupTask(name, taskFunction, priority)
+    table.insert(self.cleanupTasks, {
+        name = name,
+        func = taskFunction,
+        priority = priority or 100,
+        executed = false
+    })
+    
+    -- Sort by priority
+    table.sort(self.cleanupTasks, function(a, b)
+        return a.priority < b.priority
+    end)
+end
+
+function CleanupHandler:execute()
+    if self.executed then
+        return
+    end
+    
+    self.executed = true
+    
+    self.pipeline.logger:info("Executing cleanup tasks...")
+    
+    for _, task in ipairs(self.cleanupTasks) do
+        if not task.executed then
+            self.pipeline.logger:debug("Cleanup: " .. task.name)
+            
+            local success, result = pcall(task.func)
+            
+            if success then
+                task.executed = true
+            else
+                self.pipeline.logger:warning("Cleanup task failed: " .. task.name .. " - " .. tostring(result))
+            end
+        end
+    end
+    
+    self.pipeline.logger:info("Cleanup complete")
+end
+
+function CleanupHandler:reset()
+    self.executed = false
+    for _, task in ipairs(self.cleanupTasks) do
+        task.executed = false
+    end
+end
+
+-- ============================================================================
+-- SECTION 12: ENTRY POINT
+-- ============================================================================
+
+local function main()
+    -- Create pipeline
+    local pipeline = ExecutionPipeline.new(CONFIG)
+    
+    -- Create cleanup handler
+    local cleanup = CleanupHandler.new(pipeline)
+    
+    -- Register cleanup tasks
+    cleanup:registerCleanupTask("Clear HTTP cache", function()
+        pipeline.httpHandler:clearCache()
+    end, 10)
+    
+    cleanup:registerCleanupTask("Clear error history", function()
+        pipeline.errorHandler:clearErrors()
+    end, 20)
+    
+    cleanup:registerCleanupTask("Reset timer manager", function()
+        pipeline.timerManager:reset()
+    end, 30)
+    
+    cleanup:registerCleanupTask("Clear execution history", function()
+        pipeline.scriptExecutor:clearHistory()
+    end, 40)
+    
+    cleanup:registerCleanupTask("Reset performance monitor", function()
+        pipeline.performanceMonitor:reset()
+    end, 50)
+    
+    -- Run the pipeline
+    local success, result = pcall(function()
+        return pipeline:run()
+    end)
+    
+    if not success then
+        pipeline.logger:error("Pipeline failed with error: " .. tostring(result))
+    end
+    
+    -- Execute cleanup
+    cleanup:execute()
+    
+    -- Final grace period
+    if CONFIG.TIMING.GRACEFUL_SHUTDOWN_DELAY > 0 then
+        task.wait(CONFIG.TIMING.GRACEFUL_SHUTDOWN_DELAY)
+    end
+    
+    return success, result
+end
+
+-- ============================================================================
+-- EXECUTE MAIN FUNCTION
+-- ============================================================================
+
+local executionSuccess, executionResult = main()
+
+-- Return result for external access if needed
+return {
+    success = executionSuccess,
+    result = executionResult,
+    timestamp = Utilities.getFormattedTimestamp()
+}
